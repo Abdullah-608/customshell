@@ -44,6 +44,10 @@ int builtin_find(VFS* vfs, Command* cmd, int input_fd, int output_fd);
 int builtin_sed(VFS* vfs, Command* cmd, int input_fd, int output_fd);
 int builtin_sort(VFS* vfs, Command* cmd, int input_fd, int output_fd);
 int builtin_cut(VFS* vfs, Command* cmd, int input_fd, int output_fd);
+int builtin_jobs(VFS* vfs, Command* cmd, int input_fd, int output_fd);
+int builtin_fg(VFS* vfs, Command* cmd, int input_fd, int output_fd);
+int builtin_bg(VFS* vfs, Command* cmd, int input_fd, int output_fd);
+int builtin_kill(VFS* vfs, Command* cmd, int input_fd, int output_fd);
 
 #endif // BUILTINS_H
 

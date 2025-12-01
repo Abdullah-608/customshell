@@ -18,6 +18,9 @@ extern char** history_list;
 extern int history_count;
 extern int history_capacity;
 
+// Global job manager (declared in shell.c)
+extern JobManager* job_mgr;
+
 // Function prototypes
 void shell_init(VFS* vfs);
 void shell_cleanup(void);

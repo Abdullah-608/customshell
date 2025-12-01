@@ -1,11 +1,14 @@
 #include "builtins.h"
 #include "utils.h"
 #include "file_helpers.h"
+#include "shell.h"
+#include "process.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
+#include <windows.h>
 
 extern char** history_list;
 extern int history_count;
@@ -35,6 +38,10 @@ static BuiltinCommand builtins[] = {
     {"sed", builtin_sed},
     {"sort", builtin_sort},
     {"cut", builtin_cut},
+    {"jobs", builtin_jobs},
+    {"fg", builtin_fg},
+    {"bg", builtin_bg},
+    {"kill", builtin_kill},
     {NULL, NULL}
 };
 
@@ -292,6 +299,13 @@ int builtin_help(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
     fprintf(out, "  clear             - Clear screen\n");
     fprintf(out, "  help              - Show this help\n");
     fprintf(out, "  exit / quit       - Exit the shell\n");
+    fprintf(out, "\n");
+    fprintf(out, "Job Control:\n");
+    fprintf(out, "  jobs              - List background jobs\n");
+    fprintf(out, "  fg [n]            - Bring job to foreground\n");
+    fprintf(out, "  bg [n]            - Resume job in background\n");
+    fprintf(out, "  kill [n]          - Terminate a job\n");
+    fprintf(out, "  <command> &       - Run command in background\n");
     fprintf(out, "\n");
     fprintf(out, "Features:\n");
     fprintf(out, "  - Piping with |\n");
@@ -1190,6 +1204,192 @@ int builtin_cut(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
                 }
             }
         }
+    }
+    
+    if (out != stdout && out != stderr) fclose(out);
+    return 0;
+}
+
+// Jobs - list background jobs
+int builtin_jobs(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
+    FILE* out = get_output_file(output_fd);
+    
+    extern JobManager* job_mgr;
+    if (!job_mgr || job_mgr->count == 0) {
+        fprintf(out, "No jobs\n");
+        if (out != stdout && out != stderr) fclose(out);
+        return 0;
+    }
+    
+    for (int i = 0; i < job_mgr->count; i++) {
+        Job* job = &job_mgr->jobs[i];
+        DWORD exit_code;
+        bool is_running = false;
+        
+        if (job->hProcess != INVALID_HANDLE_VALUE) {
+            if (GetExitCodeProcess(job->hProcess, &exit_code)) {
+                is_running = (exit_code == STILL_ACTIVE);
+            }
+        }
+        
+        const char* status = is_running ? "Running" : "Stopped";
+        fprintf(out, "[%d] %s %s (PID: %lu)\n", 
+                i + 1, status, job->command ? job->command : "unknown", 
+                (unsigned long)job->dwProcessId);
+    }
+    
+    if (out != stdout && out != stderr) fclose(out);
+    return 0;
+}
+
+// Foreground - bring job to foreground
+int builtin_fg(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
+    FILE* out = get_output_file(output_fd);
+    
+    extern JobManager* job_mgr;
+    if (!job_mgr || job_mgr->count == 0) {
+        fprintf(out, "fg: no current job\n");
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    int job_num = 0;
+    if (cmd->argc > 1) {
+        job_num = atoi(cmd->argv[1]);
+        if (job_num < 1 || job_num > job_mgr->count) {
+            fprintf(out, "fg: %s: no such job\n", cmd->argv[1]);
+            if (out != stdout && out != stderr) fclose(out);
+            return 1;
+        }
+        job_num--; // Convert to 0-based index
+    } else {
+        // Use most recent job
+        job_num = job_mgr->count - 1;
+    }
+    
+    Job* job = &job_mgr->jobs[job_num];
+    if (job->hProcess == INVALID_HANDLE_VALUE) {
+        fprintf(out, "fg: job [%d] has invalid process\n", job_num + 1);
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    DWORD exit_code;
+    if (GetExitCodeProcess(job->hProcess, &exit_code)) {
+        if (exit_code == STILL_ACTIVE) {
+            // Process is still running, wait for it
+            fprintf(out, "Bringing job [%d] to foreground...\n", job_num + 1);
+            WaitForSingleObject(job->hProcess, INFINITE);
+            GetExitCodeProcess(job->hProcess, &exit_code);
+            fprintf(out, "Job [%d] finished with exit code %lu\n", 
+                    job_num + 1, (unsigned long)exit_code);
+        } else {
+            fprintf(out, "Job [%d] already finished (exit code %lu)\n", 
+                    job_num + 1, (unsigned long)exit_code);
+        }
+    }
+    
+    // Remove finished job
+    job_manager_remove(job_mgr, job->dwProcessId);
+    
+    if (out != stdout && out != stderr) fclose(out);
+    return 0;
+}
+
+// Background - resume stopped job
+int builtin_bg(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
+    FILE* out = get_output_file(output_fd);
+    
+    extern JobManager* job_mgr;
+    if (!job_mgr || job_mgr->count == 0) {
+        fprintf(out, "bg: no current job\n");
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    int job_num = 0;
+    if (cmd->argc > 1) {
+        job_num = atoi(cmd->argv[1]);
+        if (job_num < 1 || job_num > job_mgr->count) {
+            fprintf(out, "bg: %s: no such job\n", cmd->argv[1]);
+            if (out != stdout && out != stderr) fclose(out);
+            return 1;
+        }
+        job_num--; // Convert to 0-based index
+    } else {
+        // Use most recent job
+        job_num = job_mgr->count - 1;
+    }
+    
+    Job* job = &job_mgr->jobs[job_num];
+    if (job->hProcess == INVALID_HANDLE_VALUE) {
+        fprintf(out, "bg: job [%d] has invalid process\n", job_num + 1);
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    DWORD exit_code;
+    if (GetExitCodeProcess(job->hProcess, &exit_code)) {
+        if (exit_code == STILL_ACTIVE) {
+            // Process is already running
+            fprintf(out, "Job [%d] is already running\n", job_num + 1);
+        } else {
+            // On Windows, we can't really resume a stopped process
+            // This is a limitation - we'll just report it
+            fprintf(out, "bg: job [%d] cannot be resumed (Windows limitation)\n", job_num + 1);
+        }
+    }
+    
+    if (out != stdout && out != stderr) fclose(out);
+    return 0;
+}
+
+// Kill - terminate a job
+int builtin_kill(VFS* vfs, Command* cmd, int input_fd, int output_fd) {
+    FILE* out = get_output_file(output_fd);
+    
+    if (cmd->argc < 2) {
+        fprintf(out, "kill: missing job number\n");
+        fprintf(out, "Usage: kill <job_number>\n");
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    extern JobManager* job_mgr;
+    if (!job_mgr || job_mgr->count == 0) {
+        fprintf(out, "kill: no jobs\n");
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    int job_num = atoi(cmd->argv[1]);
+    if (job_num < 1 || job_num > job_mgr->count) {
+        fprintf(out, "kill: %s: no such job\n", cmd->argv[1]);
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    job_num--; // Convert to 0-based index
+    Job* job = &job_mgr->jobs[job_num];
+    
+    if (job->hProcess == INVALID_HANDLE_VALUE) {
+        fprintf(out, "kill: job [%d] has invalid process\n", job_num + 1);
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
+    }
+    
+    // Terminate the process
+    if (TerminateProcess(job->hProcess, 1)) {
+        fprintf(out, "Job [%d] (PID: %lu) terminated\n", 
+                job_num + 1, (unsigned long)job->dwProcessId);
+        CloseHandle(job->hProcess);
+        job_manager_remove(job_mgr, job->dwProcessId);
+    } else {
+        DWORD error = GetLastError();
+        fprintf(out, "kill: failed to terminate job [%d]: error %lu\n", 
+                job_num + 1, (unsigned long)error);
+        if (out != stdout && out != stderr) fclose(out);
+        return 1;
     }
     
     if (out != stdout && out != stderr) fclose(out);
